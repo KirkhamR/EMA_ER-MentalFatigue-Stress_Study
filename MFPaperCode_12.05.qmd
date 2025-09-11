@@ -1,0 +1,907 @@
+---
+title: "Dynamic Associations Between Emotion Regulation, Mental Fatigue, and Stress: An Ecological Momentary Assessment Study"
+date: 'May 2025'
+toc: true
+number-sections: true
+format: 
+  html: 
+    code-fold: true
+    self-contained: true
+    grid:
+      body-width: 1200px
+---
+## Loading Packages
+
+```{r}
+
+# | label: Loading Packages
+
+library(data.table)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(diagram)
+library(mediation)
+library(emmeans)
+library(lme4)
+library(brms)
+library(cmdstanr)
+library(openxlsx)
+library(writexl)
+library(shinystan)
+library(bayestestR)
+library(readr)
+
+```
+
+## Summarize and Prepare the Data
+
+```{r}
+
+d <- read_excel("~/Clin PhD/Research Project/Study 2. Quantitative Study MF/Data/EMA/EMA_data_09.05.25_part.xlsx", na = c("", "na"))
+d  <- as.data.table(d)
+d <- type_convert(d)
+
+##Datacheck - Valid Pairs
+# Sort the data by PID, Day_Number, and Session_Number to ensure correct order
+d <- d[order(d$PID, d$Day_Number, d$Session_Number), ]
+
+# Ensure that Day_Number and Session_Number are integers
+d$Day_Number <- as.integer(d$Day_Number)
+d$Session_Number <- as.integer(d$Session_Number)
+
+# Create new columns to indicate the previous session number, day, and PID
+d$prev_session_number <- c(NA, head(d$Session_Number, -1))
+d$prev_day_number <- c(NA, head(d$Day_Number, -1))
+d$prev_PID <- c(NA, head(d$PID, -1))  # To ensure valid pairs are from the same PID
+
+# Identify valid pairs
+d$valid_pair <- ifelse(
+  !is.na(d$StartDate) & 
+    !is.na(c(NA, head(d$StartDate, -1))) & # Check if the previous row's StartDate is also not missing
+    d$PID == d$prev_PID &                 # Ensure the previous row has the same PID
+    d$Day_Number == d$prev_day_number & 
+    d$Session_Number == d$prev_session_number + 1, 
+  1, 
+  0
+)
+
+# Aggregate the number of valid pairs per PID
+pairs_per_person <- aggregate(valid_pair ~ PID, data = d, sum)
+
+# Subset the original data to include only PIDs with at least one valid pair
+valid_pids <- pairs_per_person$PID[pairs_per_person$valid_pair > 0]
+d <- d[d$PID %in% valid_pids, ]
+
+# Print the number of PIDs after filtering and a preview of the data
+cat("Number of PIDs with at least one valid pair:", length(unique(d$PID)), "\n")
+head(d)
+
+#### Demographics ####
+# To find the number of unique PIDs:
+unique_pids <- length(unique(d$PID))
+
+# To find the total number of surveys with non-NA 'StartDate':
+total_surveys_non_na <- sum(!is.na(d$ER_1_Dis))
+
+# Output the results
+cat("Number of unique PIDs:", unique_pids, "\n")
+
+cat("Total number of surveys with non-NA StartDate:", total_surveys_non_na, "\n")
+
+Session1count_non_na <- sum(d$Session_Number == 1 & !is.na(d$StartDate))
+cat("Total number of Session 1 surveys with non-NA StartDate:", Session1count_non_na, "\n")
+
+Session2count_non_na <- sum(d$Session_Number == 2 & !is.na(d$StartDate))
+cat("Total number of Session 2 surveys with non-NA StartDate:", Session2count_non_na, "\n")
+
+Session3count_non_na <- sum(d$Session_Number == 3 & !is.na(d$StartDate))
+cat("Total number of Session 3 surveys with non-NA StartDate:", Session3count_non_na, "\n")
+
+Session4count_non_na <- sum(d$Session_Number == 4 & !is.na(d$StartDate))
+cat("Total number of Session 4 surveys with non-NA StartDate:", Session4count_non_na, "\n")
+
+# Calculate the max possible number of surveys
+total_possible_surveys <- 4 * 28  
+
+# Count completed surveys per PID
+survey_counts <- d %>%
+  filter(Finished == 1) %>%
+  group_by(PID) %>%
+  summarise(surveys_completed = n())
+
+# Calculate percentage completion per participant
+Percent_Complete_byPID <- survey_counts %>%
+  mutate(Percent_Complete = (surveys_completed / total_possible_surveys) * 100)
+
+# View the result
+print(Percent_Complete_byPID)
+
+summary(Percent_Complete_byPID)
+sd(Percent_Complete_byPID$surveys_completed)
+
+# List of ER variables
+er_vars <- c("ER_1_Dis", "ER_2_Rum", "ER_3_SBl", "ER_4_ExprS", "ER_5_ExperS", "ER_6_Acc", "ER_7_Pla", "ER_8_Rea", "ER_9_ESu", "ER_10_Rel")
+
+# Part 1: Count how many surveys had at least one ER strategy endorsed
+surveys_with_ER <- d %>%
+  mutate(ER_endorsed = rowSums(across(all_of(er_vars)) > 0) > 0) %>%
+  filter(ER_endorsed == TRUE)
+
+# Total number of surveys with at least one ER strategy endorsed
+total_surveys_with_ER <- nrow(surveys_with_ER)
+
+# Part 2: Calculate mean, median, SD, and range of ER strategies endorsed per survey
+ER_usage_stats <- surveys_with_ER %>%
+  mutate(ER_endorsed_count = rowSums(across(all_of(er_vars)) > 0)) %>%
+  summarise(
+    mean_ER = mean(ER_endorsed_count, na.rm = TRUE),
+    median_ER = median(ER_endorsed_count, na.rm = TRUE),
+    sd_ER = sd(ER_endorsed_count, na.rm = TRUE),
+    range_ER = paste(min(ER_endorsed_count), "-", max(ER_endorsed_count))
+  )
+
+# Output results
+cat("Total surveys with at least one ER strategy endorsed:", total_surveys_with_ER, "\n")
+print(ER_usage_stats)
+
+# Add 'any ER' (any strategy except 'ER_0_Non')
+d <- d %>%
+  mutate(Any_ER = rowSums(across(all_of(er_vars)) > 0) > 0)
+
+# Count the number of surveys where each strategy was endorsed
+survey_counts <- d %>%
+  summarise(across(all_of(c(er_vars, "Any_ER", "ER_0_Non")), 
+                   ~ sum(. > 0, na.rm = TRUE), 
+                   .names = "Surveys_{.col}"))
+
+# View results
+print(survey_counts)
+
+# Count unique participants who endorsed each strategy
+participant_counts <- d %>%
+  group_by(PID) %>%
+  summarise(across(all_of(c(er_vars, "Any_ER", "ER_0_Non")), 
+                   ~ any(. > 0, na.rm = TRUE), 
+                   .names = "Used_{.col}")) %>%
+  summarise(across(starts_with("Used_"), 
+                   ~ sum(.), 
+                   .names = "Participants_{.col}")) 
+
+# Calculate the percentage of participants who endorsed each strategy
+total_participants <- n_distinct(d$PID)
+
+participant_percentages <- participant_counts %>%
+  mutate(across(starts_with("Participants_"), 
+                ~ (. / total_participants) * 100, 
+                .names = "Percent_{.col}"))
+
+# View results
+print(participant_percentages)
+
+# Count unique participants who endorsed each strategy by gender
+gender_split_counts <- d %>%
+  group_by(PID, T1_Gender) %>%
+  summarise(across(all_of(c(er_vars, "Any_ER", "ER_0_Non")), 
+                   ~ any(. > 0, na.rm = TRUE), 
+                   .names = "Used_{.col}")) %>%
+  group_by(T1_Gender) %>%
+  summarise(across(starts_with("Used_"), 
+                   ~ sum(.), 
+                   .names = "Participants_{.col}"))
+
+# View the result
+gender_split_counts
+
+# Calculate the mean total number of surveys per participant
+mean_total_surveys <- d %>%
+  group_by(PID) %>%
+  summarise(total_surveys = n()) %>%
+  summarise(mean_total_surveys = mean(total_surveys, na.rm = TRUE))
+
+# Calculate the mean number of surveys endorsed per participant for each strategy and calculate the percentage
+mean_and_percentage_per_strategy <- d %>%
+  group_by(PID) %>%
+  summarise(
+    across(all_of(er_vars), ~ sum(. > 0, na.rm = TRUE)),  # Count endorsements for each ER variable
+    Any_ER = sum(rowSums(across(all_of(er_vars), ~ . > 0), na.rm = TRUE) > 0),  # Count Any_ER
+    ER_0_Non = sum(ER_0_Non > 0, na.rm = TRUE)  # Count ER_0_Non
+  ) %>%
+  summarise(
+    across(everything(), mean, na.rm = TRUE)  # Calculate means for each strategy
+  ) %>%
+  mutate(
+    Any_ER_percent = (Any_ER / mean_total_surveys$mean_total_surveys) * 100,  # Calculate percentage for Any_ER
+    ER_0_Non_percent = (ER_0_Non / mean_total_surveys$mean_total_surveys) * 100,  # Calculate percentage for ER_0_Non
+    across(starts_with("ER_"), ~ (. / mean_total_surveys$mean_total_surveys) * 100, .names = "{.col}_percent")  # Calculate percentage for all ER strategies
+  )
+
+# View the result
+mean_and_percentage_per_strategy
+
+#number of males and females 
+# Count the number of unique males (0) and females (1) in the sample
+sex_counts <- d %>%
+  group_by(PID) %>%
+  summarise(T1_Sex = first(T1_Sex)) %>%  # Get the sex for each unique participant
+  summarise(
+    Males = sum(T1_Sex == 0, na.rm = TRUE),
+    Females = sum(T1_Sex == 1, na.rm = TRUE)
+  )
+
+# View the result
+print(sex_counts)
+
+# Calculate mean, median, SD, and range of Age_2024 per unique participant
+age_summary <- d %>%
+  group_by(PID) %>%
+  summarise(Age_2024 = first(Age_2024)) %>%  # Ensure each participant is counted once
+  summarise(
+    Mean_Age = mean(Age_2024, na.rm = TRUE),
+    Median_Age = median(Age_2024, na.rm = TRUE),
+    SD_Age = sd(Age_2024, na.rm = TRUE),
+    Min_Age = min(Age_2024, na.rm = TRUE),
+    Max_Age = max(Age_2024, na.rm = TRUE),
+    Range_Age = Max_Age - Min_Age  # Compute the range
+  )
+
+# View the result
+print(age_summary)
+
+# Count the number of unique men (0) and women (1) in the sample
+gender_counts <- d %>%
+  group_by(PID) %>%
+  summarise(T1_Gender = first(T1_Gender)) %>%  # Get the sex for each unique participant
+  summarise(
+    Man = sum(T1_Gender == 0, na.rm = TRUE),
+    Woman = sum(T1_Gender == 1, na.rm = TRUE),
+  )
+
+# View the result
+print(gender_counts)
+
+# Aggregate endorsements per PID, ensuring each PID is counted once per ethnicity
+pid_summary <- d %>%
+  group_by(PID) %>%
+  summarise(across(starts_with("T1_Ethnicity_"), ~any(. == 1, na.rm = TRUE))) %>%
+  ungroup()
+
+# Count how many unique PIDs endorsed each ethnicity
+ethnicity_counts <- pid_summary %>%
+  summarise(across(starts_with("T1_Ethnicity_"), ~sum(. == TRUE)))
+
+print(ethnicity_counts)
+
+# Define income bracket labels
+income_labels <- c(
+  "Less than $10,000",
+  "$10,000 to $19,999",
+  "$20,000 to $29,999",
+  "$30,000 to $39,999",
+  "$40,000 to $49,999",
+  "$50,000 to $59,999",
+  "$60,000 to $69,999",
+  "$70,000 to $79,999",
+  "$80,000 to $89,999",
+  "$90,000 to $99,999",
+  "$100,000 to $149,999",
+  "$150,000 or more"
+)
+
+# Ensure unique endorsement per PID by taking the first non-NA income level
+income_summary <- d %>%
+  group_by(PID) %>%
+  summarise(T1_Income = min(T1_Income, na.rm = TRUE)) %>%  # Get the lowest valid income level per PID
+  ungroup()
+
+# Remove cases where all values were NA
+income_summary <- income_summary %>%
+  filter(!is.infinite(T1_Income)) 
+
+# Count occurrences of each income level
+income_counts <- income_summary %>%
+  count(T1_Income, name = "Count") %>%
+  arrange(T1_Income)
+
+# Assign labels
+income_counts <- income_counts %>%
+  mutate(Income_Bracket = income_labels[T1_Income])
+
+# Print result
+print(income_counts)
+
+#how long did surveys take?
+mean(d$Duration_Sec, na.rm = TRUE)
+sd(d$Duration_Sec, na.rm = TRUE)
+median(d$Duration_Sec, na.rm = TRUE)
+
+#how long between surveys (betwene PID, within day)
+
+# Calculate time differences between consecutive sessions (1-2, 2-3, 3-4) for each PID and Day_Number
+average_time_between_consecutive_sessions <- d %>%
+  arrange(PID, Day_Number, Session_Number) %>% # Ensure sorting by PID, Day, and Session
+  group_by(PID, Day_Number) %>%
+  mutate(time_diff = as.numeric(difftime(StartDate, lag(StartDate), units = "mins"))) %>%
+  filter((Session_Number == 2 & lag(Session_Number) == 1) |
+           (Session_Number == 3 & lag(Session_Number) == 2) |
+           (Session_Number == 4 & lag(Session_Number) == 3)) %>%
+  summarise(mean_time_diff_per_day = mean(time_diff, na.rm = TRUE)) %>%
+  ungroup()
+
+# Calculate the overall average time between sessions across all PIDs and days
+overall_average_time <- mean(average_time_between_consecutive_sessions$mean_time_diff_per_day, na.rm = TRUE)
+
+# Print the overall average time
+print(overall_average_time)
+
+
+#### Number of Strategies####
+df <- read_excel("~/Clin PhD/Research Project/Study 2. Quantitative Study MF/Data/EMA/EMA_data_09.05.25_part.xlsx")
+
+# Count the number of strategies used (from 0 to 10) in each survey
+df <- df %>%
+  mutate(
+    num_strategies = rowSums(cbind(ER_1_Dis, ER_2_Rum, ER_3_SBl, ER_4_ExprS,
+                                   ER_5_ExperS, ER_6_Acc, ER_7_Pla, ER_8_Rea,
+                                   ER_9_ESu, ER_10_Rel) == 1, na.rm = TRUE)
+  )
+
+# Count how many surveys had 0, 1, 2, ..., 10 strategies used
+strategy_count <- df %>%
+  group_by(num_strategies) %>%
+  summarise(
+    total_surveys = n(),
+    percentage = total_surveys / nrow(df) * 100,
+    .groups = "drop"
+  )
+
+# Count how many rows had ER_0_Non endorsed (ER_0_Non == 1)
+non_endorsed_count <- df %>%
+  filter(ER_0_Non == 1) %>%
+  summarise(
+    total_non_endorsed = n(),
+    percentage_non_endorsed = total_non_endorsed / nrow(df) * 100
+  )
+
+# Output the results
+print(strategy_count)
+print(non_endorsed_count)
+
+# Count unique participants endorsing each count of strategies
+unique_participants <- df %>%
+  group_by(num_strategies) %>%
+  summarise(
+    unique_participants = n_distinct(PID),
+    .groups = "drop"
+  )
+
+# View the result
+print(unique_participants)
+
+# Count unique participants by gender (1=man, 0=woman)
+Sex_breakdown <- df %>%
+  group_by(num_strategies, T1_Sex) %>%
+  summarise(
+    unique_participants = n_distinct(PID),
+    .groups = "drop"
+  ) %>%
+  spread(key = T1_Sex, value = unique_participants, fill = 0) %>%
+  mutate(
+    total_participants = `1` + `0`,
+    woman_percentage = (`1` / total_participants) * 100,
+    man_percentage = (`0` / total_participants) * 100
+  )
+
+# View the result
+print(Sex_breakdown)
+
+#mean number of surveys per participant that included each strategy and the mean number of surveys endorsing any strategy,
+# Step 1: Count the number of surveys where each strategy was endorsed per participant
+df_counts <- df %>%
+  group_by(PID) %>%
+  mutate(
+    total_surveys_per_participant = n(),  # Count total surveys per participant
+    across(c(ER_1_Dis, ER_2_Rum, ER_3_SBl, ER_4_ExprS, 
+             ER_5_ExperS, ER_6_Acc, ER_7_Pla, ER_8_Rea, 
+             ER_9_ESu, ER_10_Rel), 
+           ~ sum(. == 1, na.rm = TRUE), .names = "count_{.col}"),
+    
+    # Count surveys where at least one strategy was used (excluding ER_0_Non)
+    total_surveys_with_any_strategy = sum(rowSums(across(c(ER_1_Dis:ER_10_Rel), ~ . == 1), na.rm = TRUE) > 0 & ER_0_Non != 1, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Step 2: Compute the mean number of surveys endorsed per strategy across all participants
+mean_counts <- df_counts %>%
+  summarise(
+    across(starts_with("count_"), ~ mean(.), .names = "mean_surveys_{.col}"),
+    mean_surveys_with_any_strategy = mean(total_surveys_with_any_strategy)
+  )
+
+# View result
+print(mean_counts)
+
+# Count how many times ER_0_Non was endorsed per participant
+df_ER0_counts <- df %>%
+  group_by(PID) %>%
+  summarise(total_ER0_Non = sum(ER_0_Non == 1, na.rm = TRUE)) %>%
+  ungroup()
+
+# Calculate the mean number of times ER_0_Non was endorsed across participants
+mean_ER0_Non <- mean(df_ER0_counts$total_ER0_Non, na.rm = TRUE)
+
+# View result
+print(mean_ER0_Non)
+
+# Count the number of surveys where each strategy was endorsed per participant
+df_counts <- df %>%
+  group_by(PID) %>%
+  mutate(
+    total_surveys_per_participant = n(),  # Count total surveys per participant
+    across(c(ER_1_Dis, ER_2_Rum, ER_3_SBl, ER_4_ExprS, 
+             ER_5_ExperS, ER_6_Acc, ER_7_Pla, ER_8_Rea, 
+             ER_9_ESu, ER_10_Rel), 
+           ~ sum(. == 1, na.rm = TRUE), .names = "count_{.col}"),
+    
+    # Count surveys where at least one strategy was used (excluding ER_0_Non)
+    total_surveys_with_any_strategy = sum(rowSums(across(c(ER_1_Dis:ER_10_Rel), ~ . == 1), na.rm = TRUE) > 0 & ER_0_Non != 1, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Compute the mean, standard deviation, and range for each strategy across all participants
+stats_counts <- df_counts %>%
+  summarise(
+    across(starts_with("count_"), 
+           list(mean = ~ mean(., na.rm = TRUE),
+                sd = ~ sd(., na.rm = TRUE),
+                min = ~ min(., na.rm = TRUE),
+                max = ~ max(., na.rm = TRUE)), 
+           .names = "{.fn}_surveys_{.col}"),
+    
+    mean_surveys_with_any_strategy = mean(total_surveys_with_any_strategy, na.rm = TRUE),
+    sd_surveys_with_any_strategy = sd(total_surveys_with_any_strategy, na.rm = TRUE),
+    min_surveys_with_any_strategy = min(total_surveys_with_any_strategy, na.rm = TRUE),
+    max_surveys_with_any_strategy = max(total_surveys_with_any_strategy, na.rm = TRUE)
+  )
+
+# View results for strategies
+print(stats_counts)
+
+# Count how many times ER_0_Non was endorsed per participant
+df_ER0_counts <- df %>%
+  group_by(PID) %>%
+  summarise(total_ER0_Non = sum(ER_0_Non == 1, na.rm = TRUE)) %>%
+  ungroup()
+
+# Compute the mean, SD, and range for ER_0_Non endorsements
+stats_ER0_Non <- df_ER0_counts %>%
+  summarise(
+    mean_ER0_Non = mean(total_ER0_Non, na.rm = TRUE),
+    sd_ER0_Non = sd(total_ER0_Non, na.rm = TRUE),
+    min_ER0_Non = min(total_ER0_Non, na.rm = TRUE),
+    max_ER0_Non = max(total_ER0_Non, na.rm = TRUE)
+  )
+
+# View result for ER_0_Non
+print(stats_ER0_Non)
+
+#### Checking Fatigue Scores####
+df <- read_excel("~/Clin PhD/Research Project/Study 2. Quantitative Study MF/Data/EMA/EMA_data_09.05.25_part.xlsx")
+
+#### within day correlations for MF####
+# Filter relevant columns
+df_filtered <- subset(d, select = c(PID, Day_Number, Session_Number, MF))
+
+# Calculate correlation across all days for Session 1 and Session 2
+MFcor_result_1_2 <- df_filtered %>%
+  filter(Session_Number %in% c(1, 2)) %>%  # Keep only sessions 1 and 2
+  pivot_wider(names_from = Session_Number, values_from = MF, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_1_2 = cor(Session_1, Session_2, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(MFcor_result_1_2)
+
+MFcor_result_2_3 <- df_filtered %>%
+  filter(Session_Number %in% c(2, 3)) %>%  # Keep only sessions 2 and 3
+  pivot_wider(names_from = Session_Number, values_from = MF, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_2_3 = cor(Session_2, Session_3, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(MFcor_result_2_3)
+
+MFcor_result_3_4 <- df_filtered %>%
+  filter(Session_Number %in% c(3, 4)) %>%  # Keep only sessions 2 and 3
+  pivot_wider(names_from = Session_Number, values_from = MF, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_3_4 = cor(Session_3, Session_4, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(MFcor_result_3_4)
+
+(sum(MFcor_result_1_2 + MFcor_result_2_3 + MFcor_result_3_4))/3
+
+#### within day correlations for stress####
+# Filter relevant columns
+Strdf_filtered <- subset(d, select = c(PID, Day_Number, Session_Number, Str_Overall))
+
+# Calculate correlation across all days for Session 1 and Session 2
+Strcor_result_1_2 <- Strdf_filtered %>%
+  filter(Session_Number %in% c(1, 2)) %>%  # Keep only sessions 1 and 2
+  pivot_wider(names_from = Session_Number, values_from = Str_Overall, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_1_2 = cor(Session_1, Session_2, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(Strcor_result_1_2)
+
+Strcor_result_2_3 <- Strdf_filtered %>%
+  filter(Session_Number %in% c(2, 3)) %>%  # Keep only sessions 2 and 3
+  pivot_wider(names_from = Session_Number, values_from = Str_Overall, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_2_3 = cor(Session_2, Session_3, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(Strcor_result_2_3)
+
+Strcor_result_3_4 <- Strdf_filtered %>%
+  filter(Session_Number %in% c(3, 4)) %>%  # Keep only sessions 2 and 3
+  pivot_wider(names_from = Session_Number, values_from = Str_Overall, names_prefix = "Session_") %>%  # Pivot data for paired structure
+  summarise(
+    correlation_3_4 = cor(Session_3, Session_4, use = "pairwise.complete.obs")
+  )
+
+# Print the result
+print(Strcor_result_3_4)
+
+(sum(Strcor_result_1_2 + Strcor_result_2_3 + Strcor_result_3_4))/3
+
+#### Datachecks####
+
+#proportion completed
+#Count total surveys completed per PID
+survey_counts <- d %>%
+  group_by(PID) %>%
+  summarize(
+    total_surveys_completed = sum(!is.na(MF))/112,
+    Age_2024 = first(Age_2024),          # Ensure consistent grouping
+    T1_Gender = first(T1_Gender), # Keep relevant demographic info
+    T1_Income = first(T1_Income),
+    T1_Education = first(T1_Education),
+    Str_Overall_mean = first(Str_Overall_mean),
+    MF = first(MF)
+  )
+
+t.test(total_surveys_completed~T1_Gender, data = survey_counts)
+
+summary(aov(total_surveys_completed~T1_Income, data = survey_counts)) #same as t test but for multiple categories
+cor.test(~T1_Income + total_surveys_completed, data = survey_counts)
+
+summary(aov(total_surveys_completed~Str_Overall_mean, data = survey_counts)) 
+cor.test(~Str_Overall_mean + total_surveys_completed, data = survey_counts)
+
+summary(aov(total_surveys_completed~T1_Education, data = survey_counts)) 
+cor.test(~T1_Education + total_surveys_completed, data = survey_counts)
+
+summary(aov(total_surveys_completed~Age_2024, data = survey_counts)) 
+cor.test(~Age_2024 + total_surveys_completed, data = survey_counts)
+
+summary(aov(total_surveys_completed~MF, data = survey_counts)) 
+cor.test(~MF + total_surveys_completed, data = survey_counts)
+
+#test difference between endorsement across strategies.
+# Remove the 'Surveys_Any_ER' and 'Surveys_ER_0_Non' rows
+participant_counts_filtered <- participant_counts[, !grepl("Participants_Used_Any_ER|Participants_Used_ER_0_Non", colnames(participant_counts))]
+
+# Convert the tibble to a numeric vector
+counts_vector <- as.numeric(participant_counts_filtered[1, ])
+
+# Perform the chi-squared test
+chisq.test(counts_vector)
+
+
+## weekdays and weekends 
+weekdays2  <- d %>%
+  group_by(weekdays(StartDate)) %>%
+  summarize(
+    total_surveys_completed = sum(!is.na(StartDate))
+  )
+
+# Sample data: Replace with your actual survey counts per day
+survey_counts <- c(Friday = 1563, Monday = 1578, Saturday = 1508, 
+                   Sunday = 1523, Thursday = 1604, Tuesday = 1595, Wednesday = 1613)
+
+# Expected frequency assuming equal distribution
+expected_counts <- rep(sum(survey_counts) / length(survey_counts), length(survey_counts))
+
+# Perform Chi-square goodness-of-fit test
+chi_test <- chisq.test(survey_counts, p = rep(1/7, 7))
+
+# Print results
+print(chi_test)
+
+#using the code from demogrpahics section -
+strategy_counts <- survey_counts
+
+# Chi-square goodness-of-fit test (equal expected frequencies)
+expected_counts <- rep(sum(strategy_counts) / length(strategy_counts), length(strategy_counts))
+
+chi_test <- chisq.test(strategy_counts, p = rep(1/length(strategy_counts), length(strategy_counts)))
+
+# Print results
+print(chi_test)
+
+#check how many pairs we have per PID
+# Ensure Day_Number and Session_Number are integers
+d <- d %>%
+  mutate(
+    Day_Number = as.integer(Day_Number),
+    Session_Number = as.integer(Session_Number)
+  ) %>%
+  # Sort by PID, Day_Number, and Session_Number
+  arrange(PID, Day_Number, Session_Number)
+
+# Identify valid pairs
+d <- d %>%
+  group_by(PID) %>%
+  mutate(
+    prev_day_number = lag(Day_Number),
+    prev_session_number = lag(Session_Number),
+    prev_start_date = lag(StartDate),
+    valid_pair = ifelse(
+      !is.na(StartDate) & !is.na(prev_start_date) & 
+        Day_Number == prev_day_number & 
+        Session_Number == prev_session_number + 1, 
+      1, 0
+    )
+  ) %>%
+  ungroup()
+
+#Aggregate and Summarize 
+# Count valid pairs per participant
+pairs_per_person <- d %>%
+  group_by(PID) %>%
+  summarise(
+    num_valid_pairs = sum(valid_pair, na.rm = TRUE)
+  )
+
+# Calculate statistics
+min_pairs <- min(pairs_per_person$num_valid_pairs, na.rm = TRUE)
+max_pairs <- max(pairs_per_person$num_valid_pairs, na.rm = TRUE)
+median_valid_pairs <- median(pairs_per_person$num_valid_pairs, na.rm = TRUE)
+
+cat("Minimum number of pairs per participant:", min_pairs, "\n")
+cat("Maximum number of pairs per participant:", max_pairs, "\n")
+cat("Median number of valid pairs per participant:", median_valid_pairs, "\n")
+
+# Create a frequency table with the full range of 0 to 84
+pair_freq_df <- pairs_per_person %>%
+  count(num_valid_pairs) %>%
+  complete(num_valid_pairs = 0:84, fill = list(n = 0)) %>%
+  rename(Number_of_Pairs = num_valid_pairs, Frequency = n)
+
+# View result
+print(pair_freq_df)
+
+```
+
+## Test Bidirectional impact of Mental Fatigue and not using ER strategies
+
+```{r}
+
+#### Test MF and not using strategies####
+
+# m_MF_ERNon <- brm(MF ~ Prev_ER_0_Non + T1_Gender + Age_2024 + Prev_Str_Overall
+#                   + Prev_MF_Within + (1 | PID),
+#                   family = cumulative(link = "logit", threshold = "flexible"), data = d,
+#                   backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+# saveRDS(m_MF_ERNon, file = "m_MF_ERNon.RDS")
+
+# Load the model from the saved RDS file
+m_MF_ERNon <- readRDS("../m_MF_ERNon.RDS")
+
+# Display the summary of the model
+summary(m_MF_ERNon)
+
+# m_MF_ERNon_MF <- brm(ER_0_Non ~ Prev_MF + T1_Gender + Age_2024 + Prev_Str_Overall 
+#                   + Prev_ER_0_Non + (1 | PID), 
+#                   family = bernoulli(link = "logit"), data = d,
+#                   backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+# saveRDS(m_MF_ERNon_MF, file = "m_MF_ERNon_MF.RDS")
+
+# Load the model from the saved RDS file
+m_MF_ERNon_MF <- readRDS("../m_MF_ERNon_MF.RDS")
+
+# Display the summary of the model
+summary(m_MF_ERNon_MF)
+
+# For Prev_MF             
+b <- -0.02 
+SE <- 0.04
+z_value <- b / SE
+p_value <- 2 * (1 - pnorm(abs(z_value)))  # Two-tailed test
+p_value
+
+table(d$ER_0_Non)
+```
+
+## AIM 1 - To explore whether emotion regulation strategies predict subsequent mental fatigue
+
+```{r}
+#### m_MF_ERall_final ####
+# rerun <- TRUE
+# 
+# if (rerun) {
+#   start_time <- Sys.time()
+#   print(start_time)
+#   m_MF_ERall_final <- brm(MF ~ Prev_ER_1_Dis + Prev_ER_2_Rum + Prev_ER_3_SBl + Prev_ER_4_ExprS 
+#                          + Prev_ER_5_ExperS + Prev_ER_6_Acc + Prev_ER_7_Pla + Prev_ER_8_Rea
+#                          + Prev_ER_9_ESu + Prev_ER_10_Rel + T1_Gender + Age_2024 + Prev_Str_Overall 
+#                          + Prev_MF_Within + (1 | PID), 
+#                          family = cumulative(link = "logit", threshold = "flexible"), data = d,
+#                          backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+#   saveRDS(m_MF_ERall_final, file = "m_MF_ERall_final.RDS")
+#   end_time <- Sys.time()
+#   print(end_time)
+# }
+
+m_MF_ERall_final <- readRDS("m_MF_ERall_final.RDS")
+summary(m_MF_ERall_final)
+
+exp(fixef(m_MF_ERall_final))
+
+```
+
+## AIM 2 - To explore whether mental fatigue predicts subsequent emotion regulation strategies.
+
+```{r}
+### m_ERall_MF_final ####
+# rerun <- TRUE
+# 
+# if (rerun) {
+#   Sys.time()
+#   m_ERall_MF_final <- brm(mvbind(ER_1_Dis, ER_2_Rum, ER_3_SBl, ER_4_ExprS, 
+#                                 ER_5_ExperS, ER_6_Acc, ER_7_Pla, ER_8_Rea,
+#                                 ER_9_ESu, ER_10_Rel) ~ Prev_MF + T1_Gender + Age_2024 + 
+#                            Prev_Str_Overall + (1 | p | PID),
+#                          family = bernoulli(link = "logit"), data = d,
+#                          backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+#   saveRDS(m_ERall_MF_final, file = "m_ERall_MF_final.RDS")
+#   Sys.time()
+# }
+
+m_ERall_MF_final <- readRDS("m_ERall_MF_final.RDS")
+summary(m_ERall_MF_final)
+
+exp(fixef(m_ERall_MF_final))
+
+#### m_ERall_MF_Adj_final ####
+#Adjusted model of above#
+
+# if (rerun) {
+#   Sys.time()
+#   m_ERall_MF_Adj_final <- brm(
+#   bf(ER_1_Dis ~ Prev_ER_1_Dis_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#        Age_2024 + (1|p|PID)) +
+#   bf(ER_2_Rum ~ Prev_ER_2_Rum_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#        Age_2024 + (1|p|PID)) +
+#   bf(ER_3_SBl ~ Prev_ER_3_SBl_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_4_ExprS ~ Prev_ER_4_ExprS_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_5_ExperS ~ Prev_ER_5_ExperS_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_6_Acc ~ Prev_ER_6_Acc_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_7_Pla ~ Prev_ER_7_Pla_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_8_Rea ~ Prev_ER_8_Rea_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_9_ESu ~ Prev_ER_9_ESu_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   bf(ER_10_Rel ~ Prev_ER_10_Rel_Within + Prev_Str_Overall + Prev_MF + T1_Gender + 
+#         Age_2024 + (1|p|PID)) +
+#   set_rescor(TRUE), 
+#   data = d,
+#   backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+# saveRDS(m_ERall_MF_Adj_final, file = "m_ERall_MF_Adj_final.RDS")
+# Sys.time()
+# }
+
+m_ERall_MF_Adj_final <- readRDS("m_ERall_MF_Adj_final.RDS")
+summary(m_ERall_MF_Adj_final)
+exp(fixef(m_ERall_MF_Adj_final))
+
+p_values_m_ERall_MF_Adj_final <- describe_posterior(m_ERall_MF_Adj_final, test = "p_direction")
+
+p_values_m_ERall_MF_Adj_final
+2* (1 -.9843)
+2* (1 -.6526)
+2* (1 - .8873)
+2* (1 - .6315)
+2* (1 - .6727)
+2* (1 - .9103)
+2* (1 - .8356)
+2* (1 - .9539)
+2* (1 - .9212)
+2* (1 - .7335)
+
+2* (1 -.9973)
+2* (1 -.9998)
+2* (1 - .9928)
+2* (1 - .9990)
+2* (1 - .9972)
+2* (1 - .9989)
+2* (1 - .9882)
+2* (1 - .9998)
+2* (1 - .9999)
+2* (1 - .6031)
+
+2* (1 -.9853)
+2* (1 -.6512)
+2* (1 - .8915)
+2* (1 - .6295)
+2* (1 - .6783)
+2* (1 - .9125)
+2* (1 - .8390)
+2* (1 - .9547)
+2* (1 - .9284)
+2* (1 - .7313)
+
+2* (1 -.9978)
+2* (1 -.9999)
+2* (1 - .9941)
+2* (1 - .9996)
+2* (1 - .9976)
+2* (1 - .9995)
+2* (1 - .9879)
+2* (1 - .9991)
+2* (1 - 1)
+2* (1 - .6002)
+
+
+```
+
+## Aim 3. To investigate whether the number of emotion regulation strategies implemented predicts mental fatigue.
+
+```{r}
+
+# if (rerun) {
+#   start_time <- Sys.time()
+#   print(start_time)
+#   m_MF_ER_count_cap5_final <- brm(MF ~ Prev_ER_count_cap5 + T1_Gender + Age_2024 + Prev_Str_Overall 
+#                                  + Prev_MF_Within + (1 | PID),
+#                                  family = cumulative(link = "logit", threshold = "flexible"), data = d,
+#                                  backend = "cmdstanr", chains = 4, iter = 4000, warmup = 1000, cores = 4)
+#   saveRDS(m_MF_ER_count_cap5_final, file = "m_MF_ER_count_cap5_final.RDS")
+#   end_time <- Sys.time()
+#   print(end_time)
+# }
+
+m_MF_ER_count_cap5_final <- readRDS("m_MF_ER_count_cap5_final.RDS")
+summary(m_MF_ER_count_cap5_final)
+exp(fixef(m_MF_ER_count_cap5_final))
+
+p_values <- describe_posterior(m_MF_ER_count_cap5_final, test = "p_direction")
+
+# Display the p-values
+p_values
+
+2 * (1 - .6935)
+2 * (1 - .6847)
+2 * (1 - .6253)
+2 * (1 - .6436)
+2 * (1 - .5777)
+2 * (1 - .8400)
+2 * (1 - .6533)
+
+```
+
